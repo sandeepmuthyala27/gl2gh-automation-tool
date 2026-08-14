@@ -12,10 +12,22 @@ set -euo pipefail
 # -u: treat unset variables as an error and exit.
 # -o pipefail: if any command in a pipeline fails, the whole pipeline fails.
 
-# --- Config ---> # Set script base path and load env from config.sh.
+# --- Config ---
 BASE_SCRIPT_LOC="$(cd "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 LOG_DIR="$BASE_SCRIPT_LOC/logs"
-GITLAB_API_ENDPOINT="${SOURCE_GL_SERVER_URL}/api/v4"
+
+# Default to GitLab.com if not provided.
+# Accepts either:
+#   export GITLAB_SERVER_URL="https://gitlab.com"
+#   export GITLAB_SERVER_URL="gitlab.com"
+GITLAB_SERVER_URL="${GITLAB_SERVER_URL:-https://gitlab.com}"
+GITLAB_SERVER_URL="${GITLAB_SERVER_URL%/}"
+
+if [[ "$GITLAB_SERVER_URL" != http://* && "$GITLAB_SERVER_URL" != https://* ]]; then
+  GITLAB_SERVER_URL="https://${GITLAB_SERVER_URL}"
+fi
+
+GITLAB_API_ENDPOINT="${GITLAB_SERVER_URL}/api/v4"
 
 RUN_TS="$(date +"%Y%m%d_%H%M%S")"
 mkdir -p "$LOG_DIR"
@@ -29,10 +41,17 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 # ------------------------------------------------------------
 INVENTORY_FILE="${INVENTORY_FILE:-projects.csv}"
 export INVENTORY_FILE
-[[ -z "${INVENTORY_FILE:-}" ]] && echo "[ERROR] INVENTORY_FILE $INVENTORY_FILE not set" && exit 1
-[[ ! -s "$INVENTORY_FILE" ]] && echo "[ERROR] Inventory file $INVENTORY_FILE  missing or empty" && exit 1
+
+[[ -z "${INVENTORY_FILE:-}" ]] && echo "[ERROR] INVENTORY_FILE is not set" && exit 1
+[[ ! -s "$INVENTORY_FILE" ]] && echo "[ERROR] Inventory file '$INVENTORY_FILE' is missing or empty" && exit 1
 [[ -z "${GITLAB_API_ENDPOINT:-}" ]] && echo "[ERROR] GITLAB_API_ENDPOINT not set" && exit 1
 [[ -z "${GITLAB_PAT:-}" ]] && echo "[ERROR] GITLAB_PAT not set" && exit 1
+
+echo
+echo "GitLab server URL : $GITLAB_SERVER_URL"
+echo "GitLab API endpoint: $GITLAB_API_ENDPOINT"
+echo "Using Inventory file: $INVENTORY_FILE"
+echo
 
 # ----------------------------
 # Helper: URL encode project path (namespace/project)
@@ -43,7 +62,7 @@ urlencode() {
 }
 
 # ----------------------------
-# Helper: Call GitLab API (single call) - used for project resolve only.
+# Helper: Call GitLab API (single call) - used for token/project validation and project resolve.
 # Returns: <http_code>|<response_body>
 # ----------------------------
 curl_api() {
@@ -90,6 +109,7 @@ curl_api_paged() {
   # -D headers  => write response headers to file
   # -o tmpfile  => write response body to file
   # -w          => print HTTP status code to stdout
+
   http_code="$(curl -k -sS \
     -H "PRIVATE-TOKEN: $GITLAB_PAT" \
     -H "Content-Type: application/json" \
@@ -166,7 +186,7 @@ fetch_all_pages_json() {
 }
 
 # ----------------------------
-# Read CSV header and find indexes for Namespace & Project
+# Read CSV header and find indexes for Namespace, Project and URL
 # ----------------------------
 header="$(head -n 1 "$INVENTORY_FILE" | tr -d '\r')"
 IFS=',' read -r -a cols <<< "$header"
@@ -192,6 +212,91 @@ done
 [[ -n "$URL_IDX" ]] || { echo "[ERROR] Missing required header: url"; exit 1; }
 
 # ----------------------------
+# Pre-flight project access validation
+# Fails fast before readiness checks, similar to ADO2GH PAT/project validation.
+# ----------------------------
+preflight_validate_project_access() {
+  local total_rows=0
+  local failed=false
+
+  echo "Running pre-flight GitLab project access validation..."
+  echo
+
+  while IFS= read -r raw; do
+    line="$(echo "$raw" | tr -d '\r')"
+    IFS=',' read -r -a flds <<< "$line"
+
+    ns="$(echo "${flds[$NS_IDX]:-}" | xargs)"
+    pr="$(echo "${flds[$PR_IDX]:-}" | xargs)"
+    full_url="$(echo "${flds[$URL_IDX]:-}" | xargs)"
+
+    ns="${ns%\"}"; ns="${ns#\"}"
+    pr="${pr%\"}"; pr="${pr#\"}"
+    full_url="${full_url%\"}"; full_url="${full_url#\"}"
+
+    total_rows=$((total_rows + 1))
+
+    if [[ -z "$ns" || -z "$pr" || -z "$full_url" ]]; then
+      echo "[WARN] Row: $total_rows - Skipping pre-flight due to missing values: group-path='$ns' project='$pr' url='$full_url'"
+      continue
+    fi
+
+    clean_url="${full_url%%\?*}"
+    clean_url="${clean_url%.git}"
+
+    path_part="$(echo "$clean_url" | sed -E 's#https?://[^/]+/##')"
+
+    resolved_ns="$(dirname "$path_part")"
+    resolved_pr="$(basename "$path_part")"
+
+    project_path="$resolved_ns/$resolved_pr"
+    enc_project="$(urlencode "$project_path")"
+
+    resp="$(curl_api "$GITLAB_API_ENDPOINT/projects/$enc_project")"
+    code="${resp%%|*}"
+
+    case "$code" in
+      200)
+        ;;
+      401)
+        echo "[ERROR] Project access validation failed for '$project_path'. HTTP 401 Unauthorized. Check GITLAB_PAT."
+        failed=true
+        ;;
+      403)
+        echo "[ERROR] Project access validation failed for '$project_path'. HTTP 403 Forbidden. Token does not have access."
+        failed=true
+        ;;
+      404)
+        echo "[ERROR] Project access validation failed for '$project_path'. HTTP 404 Not Found. Check project path or token visibility."
+        failed=true
+        ;;
+      FAILED)
+        echo "[ERROR] Project access validation failed for '$project_path'. Network/curl failure."
+        failed=true
+        ;;
+      *)
+        echo "[ERROR] Project access validation failed for '$project_path'. HTTP $code"
+        failed=true
+        ;;
+    esac
+
+  done < <(tail -n +2 "$INVENTORY_FILE")
+
+  echo
+
+  if [[ "$failed" == true ]]; then
+    echo "[ERROR] Pre-flight GitLab project access validation failed."
+    echo "[ERROR] Review and fix the above GitLab PAT/project access errors and retry."
+    exit 1
+  fi
+
+  echo "[OK] Pre-flight GitLab project access validation passed."
+  echo
+}
+
+preflight_validate_project_access
+
+# ----------------------------
 # Summary arrays
 # ----------------------------
 active_mr_summary=()
@@ -214,8 +319,8 @@ echo
 # Process each CSV row (skip header)
 # ----------------------------
 while IFS= read -r raw; do
-  line="$(echo "$raw" | tr -d '\r')"      # remove CR if Windows file
-  IFS=',' read -r -a flds <<< "$line"       # simple CSV split
+  line="$(echo "$raw" | tr -d '\r')" # remove CR if Windows file
+  IFS=',' read -r -a flds <<< "$line"
 
   # Read group-path, project and project URL from projects.csv
   ns="$(echo "${flds[$NS_IDX]:-}" | xargs)"
@@ -244,8 +349,9 @@ while IFS= read -r raw; do
   resolved_ns="$(dirname "$path_part")"
   resolved_pr="$(basename "$path_part")"
 
-  echo "[INFO] Resolved namespace: '$ns' -> '$resolved_ns'"
-  echo "[INFO] Resolved project : '$pr' -> '$resolved_pr'"
+  # DEBUG
+  #echo "[INFO] Resolved namespace: '$ns' -> '$resolved_ns'"
+  #echo "[INFO] Resolved project : '$pr' -> '$resolved_pr'"
 
   ns="$resolved_ns"
   pr="$resolved_pr"
@@ -266,7 +372,6 @@ while IFS= read -r raw; do
     continue
   fi
 
-  # Use GitLab's path_with_namespace if possible; else fallback
   proj_display="$(echo "$proj_body" | jq -r '.path_with_namespace // empty' 2>/dev/null || true)"
   [[ -z "$proj_display" || "$proj_display" == "null" ]] && proj_display="$project_path"
 
@@ -309,7 +414,7 @@ while IFS= read -r raw; do
     # If one failed or returned non-200, treat it as empty array to continue
     [[ "$run_body"  == "FAILED" || "$run_body"  == HTTP_* ]] && run_body='[]'
     [[ "$pend_body" == "FAILED" || "$pend_body" == HTTP_* ]] && pend_body='[]'
-
+    
     # Combine running + pending arrays
     combined="$(jq -s '.[0] + .[1]' <(echo "$run_body") <(echo "$pend_body") 2>/dev/null || echo '[]')"
     pcount="$(echo "$combined" | jq 'length' 2>/dev/null || echo 0)"
@@ -394,4 +499,3 @@ else
   echo -e "\033[32mNo open merge requests or active pipelines detected. You can proceed with migration.\033[0m"
   exit 0
 fi
- 
