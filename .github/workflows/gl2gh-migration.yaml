@@ -51,7 +51,7 @@ jobs:
     environment: ${{ inputs.ENVIRONMENT_NAME }}
 
     env:
-      SOURCE_GL_SERVER_URL: ${{ vars.SOURCE_GL_SERVER_URL }}
+      GITLAB_SERVER_URL: ${{ vars.GITLAB_SERVER_URL }}
       GITLAB_PAT: ${{ secrets.GITLAB_PAT }}
       INVENTORY_FILE: ${{ inputs.INVENTORY_FILE }}
 
@@ -116,10 +116,10 @@ jobs:
           echo "Checking environment variables..."
           echo "--------------------------------"
           
-          if [[ -n "${SOURCE_GL_SERVER_URL:-}" ]]; then
-            print_ok "SOURCE_GL_SERVER_URL is configured: ${SOURCE_GL_SERVER_URL}"
+          if [[ -n "${GITLAB_SERVER_URL:-}" ]]; then
+            print_ok "GITLAB_SERVER_URL is configured: ${GITLAB_SERVER_URL}"
           else
-            print_fail "SOURCE_GL_SERVER_URL is missing in GitHub Environment variables"
+            print_fail "GITLAB_SERVER_URL is missing in GitHub Environment variables"
           fi
 
           echo ""
@@ -308,7 +308,7 @@ jobs:
     needs: [env-validation]
 
     env:
-      SOURCE_GL_SERVER_URL: ${{ vars.SOURCE_GL_SERVER_URL }}
+      GITLAB_SERVER_URL: ${{ vars.GITLAB_SERVER_URL }}
       INVENTORY_FILE: ${{ inputs.INVENTORY_FILE }}
       GITLAB_PAT: ${{ secrets.GITLAB_PAT }}
 
@@ -383,7 +383,7 @@ jobs:
     needs: [approval-stage]
 
     env:
-      SOURCE_GL_SERVER_URL: ${{ vars.SOURCE_GL_SERVER_URL }}
+      GITLAB_SERVER_URL: ${{ vars.GITLAB_SERVER_URL }}
       GITLAB_PAT: ${{ secrets.GITLAB_PAT }}
       INVENTORY_FILE: ${{ inputs.INVENTORY_FILE }}
 
@@ -455,7 +455,7 @@ jobs:
     needs: [migrate-repositories]
     
     env:
-      SOURCE_GL_SERVER_URL: ${{ vars.SOURCE_GL_SERVER_URL }}
+      GITLAB_SERVER_URL: ${{ vars.GITLAB_SERVER_URL }}
       GITLAB_PAT: ${{ secrets.GITLAB_PAT }}
 
       TARGET_GITHUB_API_URL: ${{ inputs.TARGET_GITHUB_API_URL }}
